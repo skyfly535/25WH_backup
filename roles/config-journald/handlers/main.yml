@@ -1,0 +1,8 @@
+---
+- name: Restart Journald service
+  become: true
+  service:
+    name: "{{ _service_name }}"
+    state: restarted
+  listen: Restart service
+  ignore_errors: true
