@@ -1,0 +1,5 @@
+---
+_default_config_path: "/etc/systemd"
+_default_config_file: "journald.conf"
+journald_configs: []
+_service_name: systemd-journald

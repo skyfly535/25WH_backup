@@ -1,0 +1,65 @@
+---
+- name: Install dependencies
+  pip:
+    name: pexpect>=3.3
+    executable: pip3
+
+- name: Generate ssh key for root
+  user: 
+    name: root
+    generate_ssh_key: yes
+    ssh_key_type: ed25519
+    ssh_key_file: .ssh/id_ed25519
+    state: present
+  register: ssh_key
+
+- name: Store public key to backup_server for user borg
+  delegate_to: backup_server
+  authorized_key:
+    key: "{{ ssh_key.ssh_public_key }}"
+    user: borg
+
+- name: ssh-keyscan -H server >> ~/.ssh/known_hosts
+  shell: "ssh-keyscan -H server >> ~/.ssh/known_hosts"
+
+- name: Init borg repo
+  expect:
+    command: borg init --encryption=repokey {{ borg_remote_repo }}
+    responses:
+      passphrase: 
+      - "{{ borg_encryption_key }}"
+      - "{{ borg_encryption_key }}"
+      - "n"
+      - ""
+
+- name: Setup borg-backup.service
+  template:
+    src: borg-backup.service.j2
+    dest: /etc/systemd/system/borg-backup.service
+
+- name: Setup borg-backup.timer
+  template:
+    src: borg-backup.timer.j2
+    dest: /etc/systemd/system/borg-backup.timer
+
+- name: Start and enable service
+  systemd:
+    daemon_reload: yes
+    service: borg-backup.timer
+    enabled: yes
+    state: started
+
+- name: First start borg-backup.service
+  systemd:
+    service: borg-backup.service
+    state: started
+
+- name: Add a block for env client
+  blockinfile:
+    path: /root/.bash_profile
+    marker: "# Managed by ansible!"
+    insertafter: 'export PATH'
+    backup: yes
+    block: |
+      export BORG_PASSPHRASE={{ borg_encryption_key }}
+      export BORG_REPO={{ borg_remote_repo }}

@@ -1,0 +1,213 @@
+---
+- name: Base set up
+  hosts: all # Выполняем на обеих машинах
+  # Выполняем действия от root-пользователя
+  become: true
+  tasks:
+  # Устанавливаем epel-release
+  - name: Install epel-release package first
+    yum:
+      name: epel-release
+      state: present
+  # Устанавливаем borgbackup и libselinux-python3   
+  - name: Install other dependencies
+    yum:
+      name: "{{ packages }}"
+      state: present
+    vars: 
+      packages:
+      - libselinux-python3
+      - borgbackup
+
+- name: Prepare backup server # Настраиваем сервер
+  hosts: backup_srv
+  become: true
+  gather_facts: False
+  tasks:
+  - name: Configure hosts file # Добавляем client в файла /etc/hosts
+    lineinfile:
+      path: /etc/hosts
+      state: present
+      line: '192.168.11.150 client'
+  # Устанавливаем часовой пояс
+  - name: Set timezone 
+    command: timedatectl set-timezone Asia/Vladivostok
+  # Добавляем группу borg
+  - name: Add group borg 
+    group:
+      name: borg
+      state: present
+  # Добавляем пользователя borg
+  - name: Add user borg  
+    user:
+      name: borg
+      group: borg
+      state: present
+  # Создаем каталог /home/borg/.ssh и назначаем на него необходимые права
+  - name: Make directory .ssh  
+    file:
+      path: /home/borg/.ssh
+      state: directory
+      mode: '0700'
+      owner: borg
+      group: borg
+  # Создаем файл /home/borg/.ssh/authorized_keys и назначаем на него необходимые права
+  - name: Make file authorized_keys
+    file:
+      path: /home/borg/.ssh/authorized_keys
+      state: touch
+      mode: '0600'
+      owner: borg
+      group: borg
+  # Создаем каталог /var/backup и назначаем на него необходимые права
+  - name: Make directory /var/backup
+    file:
+      path: /var/backup
+      state: directory
+      mode: '0700'
+      owner: borg
+      group: borg
+  # Устанавливаем необходимые пакеты для монтирования нового раздела
+  - name: Install lvm2 dependency
+    package:
+      name: lvm2
+      state: present
+  # Создаем новый LVM раздел gpt
+  - name: Create new LVM partition for backups
+    parted:
+      device: /dev/sdb
+      label: gpt
+      number: 1
+      flags: [ lvm ]
+      state: present
+  # Создаем виртуальную группу backups-vg
+  - name: Create VG backups-vg
+    lvg:
+      vg: backups-vg
+      pvs: /dev/sdb1
+      pesize: "4"
+  # Создаем логический раздел
+  - name: Create LV backups-lv
+    lvol:
+      vg: backups-vg
+      lv: backups-lv
+      size: 2g
+      force: yes
+  # Создаем файловую систему
+  - name: Format partition in xfs
+    filesystem:
+      fstype: xfs
+      dev: /dev/backups-vg/backups-lv
+  # Монтируем /var/backup к новому разделу
+  - name: Mount /var/backup
+    mount:
+      path: /var/backup
+      src: /dev/backups-vg/backups-lv
+      fstype: xfs
+      state: mounted
+  # Добавляем необходимые права
+  - name: Change owner and group /var/backup
+    file:
+      path: /var/backup
+      recurse: yes
+      state: directory
+      mode: '0700'
+      owner: borg
+      group: borg
+
+- name: Prepare client # Настраиваем клиент
+  hosts: client
+  become: true
+  gather_facts: False
+  
+  tasks:
+  - name: Configure hosts file # Добавляем сервер в файла /etc/hosts
+    lineinfile:
+      path: /etc/hosts
+      state: present
+      line: '192.168.11.160 backup'
+  # Устанавливаем часовой пояс
+  - name: Set timezone
+    command: timedatectl set-timezone Asia/Vladivostok
+  # Устанавливаем необходимые зависимости
+  - name: Install dependencies
+    pip:
+      name: pexpect>=3.3
+      executable: pip3
+  # Генерируем пару ключей для работы borg
+  - name: Generate ssh key for root
+    user: 
+      name: root
+      generate_ssh_key: yes
+      ssh_key_type: ed25519
+      ssh_key_file: .ssh/id_ed25519
+      state: present
+    register: ssh_key
+  # Сохраните открытый ключ в backup_srv для пользователя borg
+  - name: Store public key to backup_srv for user borg
+    delegate_to: backup_srv
+    authorized_key:
+      key: "{{ ssh_key.ssh_public_key }}"
+      user: borg
+  # Добавляем сервер резервных копий в известные удаленно подключенные хосты
+  - name: ssh-keyscan -H server >> ~/.ssh/known_hosts
+    shell: "ssh-keyscan -H server >> ~/.ssh/known_hosts"
+  # Инициализируем репозиторий borg на backup сервере
+  - name: Init borg repo
+    expect:
+      command: borg init --encryption=repokey borg@backup:/var/backup
+      responses:
+        'Are you sure you want to continue connecting (yes/no)?': "yes"
+        passphrase:
+        - "OTUS2023"
+        - "OTUS2023"
+        - "n"
+        - ""
+  # Добавляем файл Unit-а systemd borg-backup.service
+  - name: Setup borg-backup.service
+    template:
+      src: borg-backup.service.j2
+      dest: /etc/systemd/system/borg-backup.service
+  # Добавляем файл тайймер systemd borg-backup.timer
+  - name: Setup borg-backup.timer
+    template:
+      src: borg-backup.timer.j2
+      dest: /etc/systemd/system/borg-backup.timer
+  # Запускаем borg-backup.timer и добавлюем в автозагрузку
+  - name: Start and enable service
+    systemd:
+      daemon_reload: yes
+      service: borg-backup.timer
+      enabled: yes
+      state: started
+  # Делаем первый запуск borg-backup.service
+  - name: First start borg-backup.service
+    systemd:
+      service: borg-backup.service
+      state: started
+  # Добавляем примененые окружения
+  - name: Add a block for env client
+    blockinfile:
+      path: /root/.bash_profile
+      marker: "# Managed by ansible!"
+      insertafter: 'export PATH'
+      backup: yes
+      block: |
+        export BORG_PASSPHRASE=OTUS2023
+        export BORG_REPO=borg@backup:/var/backup
+  vars:
+    ansible_python_interpreter: /usr/bin/python3 #for use expect module
+    
+# Раздел настройки логирования процесса бекапа на клиенте
+- name: Prepare client
+  hosts: client
+  become: true
+  gather_facts: False  
+  roles:
+    - role: config-journald # конфиг роли подсмотрел здесь -->  https://github.com/0x0I/ansible-role-journald
+      vars:
+        journald_configs:
+          - config:
+              Storage: persistent
+              SystemMaxFileSize: 50M
+              MaxFileSec: 1month

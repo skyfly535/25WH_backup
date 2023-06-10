@@ -1,0 +1,4 @@
+---
+borg_prune_keep_daily: 90
+borg_prune_keep_monthly: 12
+borg_prune_keep_yearly: 1

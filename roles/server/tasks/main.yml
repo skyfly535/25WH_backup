@@ -1,0 +1,85 @@
+---
+- name: Add group borg
+  group:
+    name: borg
+    state: present
+
+- name: Add user borg and generate ssh key
+  user:
+    name: borg
+    group: borg
+#    generate_ssh_key: yes
+#    ssh_key_type: ed25519
+#    ssh_key_file: .ssh/id_ed25519
+    state: present
+
+- name: Make directory .ssh
+  file:
+    path: /home/borg/.ssh
+    state: directory
+    mode: '0700'
+    owner: borg
+    group: borg
+
+- name: Make file authorized_keys
+  file:
+    path: /home/borg/.ssh/authorized_keys
+    state: touch
+    mode: '0600'
+    owner: borg
+    group: borg
+
+- name: Make directory /var/backup
+  file:
+    path: /var/backup
+    state: directory
+    mode: '0700'
+    owner: borg
+    group: borg
+
+- name: Install lvm2 dependency
+  package:
+    name: lvm2
+    state: present
+
+- name: Create new LVM partition for backups
+  parted:
+    device: /dev/sdb
+    label: gpt
+    number: 1
+    flags: [ lvm ]
+    state: present
+
+- name: Create VG backups-vg
+  lvg:
+    vg: backups-vg
+    pvs: /dev/sdb1
+    pesize: "4"
+
+- name: Create LV backups-lv
+  lvol:
+    vg: backups-vg
+    lv: backups-lv
+    size: 2g
+    force: yes
+
+- name: Format partition in xfs
+  filesystem:
+    fstype: xfs
+    dev: /dev/backups-vg/backups-lv
+
+- name: Mount /var/backup
+  mount:
+    path: /var/backup
+    src: /dev/backups-vg/backups-lv
+    fstype: xfs
+    state: mounted
+
+- name: Change owner and group /var/backup
+  file:
+    path: /var/backup
+    recurse: yes
+    state: directory
+    mode: '0700'
+    owner: borg
+    group: borg

@@ -1,0 +1,19 @@
+[Unit]
+Description=Borg Backup
+
+[Service]
+Type=oneshot
+
+Environment="BORG_PASSPHRASE={{ borg_encryption_key }}"
+Environment=REPO={{ borg_remote_repo }}
+Environment=BACKUP_TARGET={{ borg_backup_target }}
+
+ExecStart=/bin/borg create \
+        --stats \
+        ${REPO}::etc-{now:%%Y-%%m-%%d_%%H:%%M:%%S} ${BACKUP_TARGET}
+ExecStart=/bin/borg check ${REPO}
+ExecStart=/bin/borg prune \
+        --keep-daily {{ borg_prune_keep_daily }} \
+        --keep-monthly {{ borg_prune_keep_monthly }} \
+        --keep-yearly {{ borg_prune_keep_yearly }} \
+        ${REPO}
